@@ -1,6 +1,6 @@
-import { env, pipeline, type AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
+import { env, pipeline } from '@huggingface/transformers';
 
-env.backends.onnx.wasm.numThreads = 1;
+if (env.backends.onnx.wasm) env.backends.onnx.wasm.numThreads = 1;
 
 type WorkerMessage =
   | { type: 'INIT'; model?: string }
@@ -13,7 +13,9 @@ type WorkerResponse =
   | { status: 'done'; text: string; chunks?: Array<{ text: string; timestamp: [number, number] }> }
   | { status: 'error'; message: string };
 
-let transcriber: AutomaticSpeechRecognitionPipeline | null = null;
+type TranscriberResult = { text: string; chunks?: Array<{ text: string; timestamp: [number, number] }> };
+type Transcriber = (audio: Float32Array, options: { return_timestamps: true; chunk_length_s: number; stride_length_s: number }) => Promise<TranscriberResult>;
+let transcriber: Transcriber | null = null;
 let activeModel = 'Xenova/whisper-tiny.en';
 
 self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
@@ -21,10 +23,10 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
     if (event.data.type === 'INIT') {
       activeModel = event.data.model ?? activeModel;
       self.postMessage({ status: 'loading', message: `Loading ${activeModel} locally…` } satisfies WorkerResponse);
-      transcriber = await pipeline('automatic-speech-recognition', activeModel, {
+      transcriber = await (pipeline as unknown as (...args: unknown[]) => Promise<unknown>)('automatic-speech-recognition', activeModel, {
         device: 'webgpu',
         dtype: 'q4',
-      });
+      }) as Transcriber;
       self.postMessage({ status: 'ready', model: activeModel } satisfies WorkerResponse);
       return;
     }
@@ -37,11 +39,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
         chunk_length_s: 30,
         stride_length_s: 5,
       });
-      const normalized = Array.isArray(result) ? result[0] : result;
-      const chunks = 'chunks' in normalized && normalized.chunks
-        ? normalized.chunks.map((chunk) => ({ text: chunk.text, timestamp: chunk.timestamp as [number, number] }))
-        : undefined;
-      self.postMessage({ status: 'done', text: normalized.text, chunks } satisfies WorkerResponse);
+      self.postMessage({ status: 'done', text: result.text, chunks: result.chunks } satisfies WorkerResponse);
     }
   } catch (error) {
     self.postMessage({ status: 'error', message: error instanceof Error ? error.message : String(error) } satisfies WorkerResponse);

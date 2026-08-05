@@ -1,4 +1,4 @@
-import { CreateWebWorkerMLCEngine, type MLCEngine } from '@mlc-ai/web-llm';
+import { CreateWebWorkerMLCEngine, type WebWorkerMLCEngine } from '@mlc-ai/web-llm';
 import type { AudioTrackInfo, CaptionCue, MediaInspection } from './types';
 import './style.css';
 
@@ -7,13 +7,21 @@ if (!app) throw new Error('App root is missing.');
 
 const whisperWorker = new Worker(new URL('./whisper.worker.ts', import.meta.url), { type: 'module' });
 const llmWorker = new Worker(new URL('./llm.worker.ts', import.meta.url), { type: 'module' });
-let llmEngine: MLCEngine | null = null;
+let llmEngine: WebWorkerMLCEngine | null = null;
 let selectedFile: File | null = null;
 let mediaUrl: string | null = null;
 let mediaElement: HTMLMediaElement | null = null;
 let activeRecorder: MediaRecorder | null = null;
 let recordedChunks: Blob[] = [];
 let lastInspection: MediaInspection | null = null;
+
+type WhisperUiMessage = {
+  status: string;
+  message?: string;
+  model?: string;
+  text?: string;
+  chunks?: Array<{ text: string; timestamp: [number, number] }>;
+};
 
 app.innerHTML = `
   <main class="shell">
@@ -114,6 +122,24 @@ const formatTime = (seconds: number) => {
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character] ?? character);
 const setStatus = (message: string) => { aiStatus.textContent = message; };
 
+type MediaTrackListLike = {
+  length: number;
+  [index: number]: AudioTrackInfo & { enabled: boolean };
+};
+
+type MediaElementExtensions = HTMLMediaElement & {
+  audioTracks?: MediaTrackListLike;
+  captureStream?: () => MediaStream;
+  mozCaptureStream?: () => MediaStream;
+};
+
+const mediaExtensions = (element: HTMLMediaElement) => element as MediaElementExtensions;
+const getAudioTracks = (element: HTMLMediaElement) => mediaExtensions(element).audioTracks;
+const getCaptureStream = (element: HTMLMediaElement) => {
+  const extended = mediaExtensions(element);
+  return extended.captureStream?.() ?? extended.mozCaptureStream?.();
+};
+
 function renderCapabilities() {
   const checks = [
     ['WebGPU', 'gpu' in navigator, 'Runs local AI models on a compatible GPU.'],
@@ -133,7 +159,7 @@ function getCaptionCues(): CaptionCue[] {
   if (!mediaElement) return [];
   return Array.from(mediaElement.textTracks).flatMap((track) => {
     track.mode = 'hidden';
-    return track.cues ? Array.from(track.cues).map((cue) => ({ startTime: cue.startTime, endTime: cue.endTime, text: cue.text })) : [];
+    return track.cues ? Array.from(track.cues).map((cue) => ({ startTime: cue.startTime, endTime: cue.endTime, text: 'text' in cue && typeof cue.text === 'string' ? cue.text : '' })) : [];
   });
 }
 
@@ -143,7 +169,8 @@ function renderCaptions(cues: CaptionCue[]) {
 }
 
 function renderTracks() {
-  const tracks = mediaElement && 'audioTracks' in mediaElement && mediaElement.audioTracks ? Array.from(mediaElement.audioTracks).map((track, index) => ({ index, id: track.id, kind: track.kind, label: track.label, language: track.language, enabled: track.enabled })) : [];
+  const audioTracks = mediaElement ? getAudioTracks(mediaElement) : undefined;
+  const tracks: AudioTrackInfo[] = audioTracks ? Array.from({ length: audioTracks.length }, (_, index) => { const track = audioTracks[index]; return { index, id: track.id, kind: track.kind, label: track.label, language: track.language, enabled: track.enabled }; }) : [];
   lastInspection = lastInspection ? { ...lastInspection, audioTracks: tracks } : lastInspection;
   if (!tracks.length) {
     trackList.innerHTML = '<span class="empty-state">This browser does not expose embedded audio-track metadata for this file.</span>';
@@ -153,8 +180,9 @@ function renderTracks() {
   }
   trackList.innerHTML = tracks.map((track) => `<label class="track-row"><input type="radio" name="audio-track" value="${track.index}" ${track.enabled ? 'checked' : ''}><span><strong>${escapeHtml(track.label || `Track ${track.index + 1}`)}</strong><small>${escapeHtml(track.kind || 'main')} ${track.language ? `· ${escapeHtml(track.language)}` : ''}</small></span></label>`).join('');
   trackList.querySelectorAll<HTMLInputElement>('input[name="audio-track"]').forEach((input) => input.addEventListener('change', () => {
-    if (!mediaElement?.audioTracks) return;
-    Array.from(mediaElement.audioTracks).forEach((track, index) => { track.enabled = index === Number(input.value); });
+    const tracks = mediaElement ? getAudioTracks(mediaElement) : undefined;
+    if (!tracks) return;
+    Array.from({ length: tracks.length }, (_, index) => tracks[index]).forEach((track, index) => { track.enabled = index === Number(input.value); });
     renderTracks();
   }));
 }
@@ -166,6 +194,7 @@ async function inspectFile(file: File) {
   mediaUrl = URL.createObjectURL(file);
   const isVideo = file.type.startsWith('video/');
   mediaElement = isVideo ? mediaPreview : audioPreview;
+  const currentMedia = mediaElement;
   mediaPreview.classList.toggle('hidden', !isVideo);
   audioPreview.classList.toggle('hidden', isVideo);
   mediaPreview.removeAttribute('src');
@@ -175,12 +204,12 @@ async function inspectFile(file: File) {
   mediaPanel.classList.remove('hidden');
   fileName.textContent = file.name;
   extractCaptionsButton.disabled = false;
-  startRecordingButton.disabled = !('captureStream' in mediaElement || 'mozCaptureStream' in mediaElement);
+  startRecordingButton.disabled = !getCaptureStream(currentMedia);
   captionsResult.innerHTML = '<span class="empty-state">Media loaded. Extract cues to inspect captions.</span>';
   recordingResult.innerHTML = '<span class="empty-state">The recording follows playback. Start it before pressing play.</span>';
   transcriptResult.innerHTML = '<span class="empty-state">Ready to transcribe when local AI is loaded.</span>';
-  mediaElement.onloadedmetadata = () => {
-    const inspection: MediaInspection = { name: file.name, type: file.type, size: file.size, duration: mediaElement?.duration ?? null, width: isVideo ? mediaPreview.videoWidth : null, height: isVideo ? mediaPreview.videoHeight : null, captions: [], audioTracks: [], canCaptureStream: 'captureStream' in mediaElement || 'mozCaptureStream' in mediaElement };
+  currentMedia.onloadedmetadata = () => {
+    const inspection: MediaInspection = { name: file.name, type: file.type, size: file.size, duration: currentMedia.duration, width: isVideo ? mediaPreview.videoWidth : null, height: isVideo ? mediaPreview.videoHeight : null, captions: [], audioTracks: [], canCaptureStream: Boolean(getCaptureStream(currentMedia)) };
     lastInspection = inspection;
     mediaStats.innerHTML = [['Type', file.type.split('/')[1]?.toUpperCase() ?? 'MEDIA'], ['Size', formatBytes(file.size)], ['Length', formatTime(inspection.duration ?? NaN)], ['Frame', isVideo ? `${inspection.width} × ${inspection.height}` : 'Audio only']].map(([label, value]) => `<div class="stat"><small>${label}</small><strong>${value}</strong></div>`).join('');
     renderTracks();
@@ -206,14 +235,14 @@ dropZone.addEventListener('keydown', (event) => { if (event.key === 'Enter' || e
 $('#clear-button')?.addEventListener('click', () => { selectedFile = null; mediaElement?.pause(); mediaElement = null; revokeMedia(); mediaPanel.classList.add('hidden'); fileInput.value = ''; });
 extractCaptionsButton.addEventListener('click', () => { const cues = getCaptionCues(); if (lastInspection) lastInspection.captions = cues; renderCaptions(cues); });
 downloadCaptionsButton.addEventListener('click', () => { if (!lastInspection?.captions.length) return; const url = URL.createObjectURL(new Blob([toVtt(lastInspection.captions)], { type: 'text/vtt' })); const link = document.createElement('a'); link.href = url; link.download = `${selectedFile?.name.replace(/\.[^.]+$/, '') ?? 'captions'}.vtt`; link.click(); URL.revokeObjectURL(url); });
-startRecordingButton.addEventListener('click', () => { if (!mediaElement || !selectedFile) return; const capture = 'captureStream' in mediaElement ? mediaElement.captureStream() : mediaElement.mozCaptureStream(); const audioTracks = capture.getAudioTracks(); if (!audioTracks.length) { recordingResult.innerHTML = '<span class="error-state">No audio track is available to capture.</span>'; return; } recordedChunks = []; activeRecorder = new MediaRecorder(new MediaStream(audioTracks), { mimeType: 'audio/webm' }); activeRecorder.ondataavailable = (event) => { if (event.data.size) recordedChunks.push(event.data); }; activeRecorder.onstart = () => { startRecordingButton.disabled = true; stopRecordingButton.disabled = false; recordingResult.innerHTML = '<span class="recording-state"><i></i> Recording active. Press stop when playback is complete.</span>'; }; activeRecorder.start(); });
+startRecordingButton.addEventListener('click', () => { if (!mediaElement || !selectedFile) return; const capture = getCaptureStream(mediaElement); if (!capture) { recordingResult.innerHTML = '<span class="error-state">Media capture is not supported in this browser.</span>'; return; } const audioTracks = capture.getAudioTracks(); if (!audioTracks.length) { recordingResult.innerHTML = '<span class="error-state">No audio track is available to capture.</span>'; return; } recordedChunks = []; activeRecorder = new MediaRecorder(new MediaStream(audioTracks), { mimeType: 'audio/webm' }); activeRecorder.ondataavailable = (event) => { if (event.data.size) recordedChunks.push(event.data); }; activeRecorder.onstart = () => { startRecordingButton.disabled = true; stopRecordingButton.disabled = false; recordingResult.innerHTML = '<span class="recording-state"><i></i> Recording active. Press stop when playback is complete.</span>'; }; activeRecorder.start(); });
 stopRecordingButton.addEventListener('click', () => { if (!activeRecorder) return; activeRecorder.onstop = () => { const blob = new Blob(recordedChunks, { type: 'audio/webm' }); const url = URL.createObjectURL(blob); recordingResult.innerHTML = `<a class="download-link" href="${url}" download="${selectedFile?.name.replace(/\.[^.]+$/, '') ?? 'extracted-audio'}.webm">Download extracted audio · ${formatBytes(blob.size)} ↗</a>`; startRecordingButton.disabled = false; stopRecordingButton.disabled = true; }; activeRecorder.stop(); activeRecorder = null; });
 
 bootAiButton.addEventListener('click', async () => {
   bootAiButton.disabled = true;
   setStatus('Loading Whisper…');
   whisperWorker.postMessage({ type: 'INIT' });
-  whisperWorker.onmessage = async (event: MessageEvent<{ status: string; message?: string; model?: string; text?: string; chunks?: Array<{ text: string; timestamp: [number, number] }>) => {
+  whisperWorker.onmessage = async (event: MessageEvent<WhisperUiMessage>) => {
     if (event.data.status === 'loading') setStatus(event.data.message ?? 'Loading model…');
     if (event.data.status === 'ready') {
       setStatus(`Whisper ready · ${event.data.model}`);
