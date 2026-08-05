@@ -1,6 +1,6 @@
 # Anne Sullivan
 
-Anne Sullivan is a private-by-default, browser-native media workbench. Drop in an audio or video file to inspect existing captions, identify descriptive-audio tracks where the browser exposes them, extract a playable audio recording, and prepare a local transcription / structured-extraction workflow.
+Anne Sullivan is a private-by-default, browser-native media workbench. Drop in an audio or video file to inspect existing captions, identify descriptive-audio tracks where the browser exposes them, extract a playable audio recording, and run local Whisper transcription in the browser.
 
 The name is a reference to the teacher and interpreter who helped Helen Keller turn experience into language. This project aims at the same bridge: media in, meaning out, without sending the media to a server.
 
@@ -12,7 +12,7 @@ The name is a reference to the teacher and interpreter who helped Helen Keller t
 - Descriptive-audio track discovery and toggling when `HTMLMediaElement.audioTracks` is available.
 - Audio capture through `captureStream()` and `MediaRecorder`, with a download link.
 - Browser capability diagnostics for WebGPU, Web Workers, Speech Recognition, and media capture.
-- Worker boundaries prepared for local Whisper transcription and WebLLM structured extraction.
+- Local Whisper transcription in a Web Worker, with automatic CPU/WASM fallback when WebGPU is unavailable.
 - GitHub Actions type-check, production build, and GitHub Pages deployment.
 
 ## Live preview
@@ -26,7 +26,7 @@ npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite. For WebGPU and WebAssembly experiments, use a current Chromium-based browser and serve over localhost or HTTPS. The first local-model implementation will be added behind the existing worker interfaces; media files remain in the browser.
+Open the local URL printed by Vite. Use a current browser and serve over localhost or HTTPS. WebGPU is used when the browser can provide a GPU adapter; otherwise Whisper runs through the CPU/WASM backend. Media files remain in the browser.
 
 ```sh
 npm run check

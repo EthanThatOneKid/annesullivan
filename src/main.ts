@@ -1,4 +1,3 @@
-import { CreateWebWorkerMLCEngine, type WebWorkerMLCEngine } from '@mlc-ai/web-llm';
 import type { AudioTrackInfo, CaptionCue, MediaInspection } from './types';
 import './style.css';
 
@@ -6,8 +5,6 @@ const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root is missing.');
 
 const whisperWorker = new Worker(new URL('./whisper.worker.ts', import.meta.url), { type: 'module' });
-const llmWorker = new Worker(new URL('./llm.worker.ts', import.meta.url), { type: 'module' });
-let llmEngine: WebWorkerMLCEngine | null = null;
 let selectedFile: File | null = null;
 let mediaUrl: string | null = null;
 let mediaElement: HTMLMediaElement | null = null;
@@ -21,6 +18,7 @@ type WhisperUiMessage = {
   model?: string;
   text?: string;
   chunks?: Array<{ text: string; timestamp: [number, number] }>;
+  device?: 'webgpu' | 'wasm';
 };
 
 app.innerHTML = `
@@ -77,9 +75,9 @@ app.innerHTML = `
           <div class="result-box" id="recording-result"><span class="empty-state">The recording follows playback. Start it before pressing play.</span></div>
         </section>
         <section class="tool-card ai-card" id="ai-card">
-          <span class="section-kicker">05 / Understand</span><h2>Local AI extraction</h2>
-          <p class="muted">Optional browser-local Whisper transcription and JSON extraction. Model downloads can be large and need WebGPU.</p>
-          <div class="tool-actions"><button class="primary-button" id="boot-ai" type="button">Boot local engines</button><button class="secondary-button" id="transcribe" type="button" disabled>Transcribe media</button></div>
+          <span class="section-kicker">05 / Transcribe</span><h2>Local transcription</h2>
+          <p class="muted">Run Whisper in this browser. WebGPU is faster when available; Anne Sullivan falls back to CPU/WASM when it is not.</p>
+          <div class="tool-actions"><button class="primary-button" id="boot-ai" type="button">Boot local Whisper</button><button class="secondary-button" id="transcribe" type="button" disabled>Transcribe media</button></div>
           <div class="progress-line"><span id="ai-status">Not loaded</span><span id="ai-progress"></span></div>
           <div class="result-box transcript-box" id="transcript-result"><span class="empty-state">No transcript yet.</span></div>
         </section>
@@ -240,35 +238,42 @@ stopRecordingButton.addEventListener('click', () => { if (!activeRecorder) retur
 
 bootAiButton.addEventListener('click', async () => {
   bootAiButton.disabled = true;
-  setStatus('Loading Whisper…');
-  whisperWorker.postMessage({ type: 'INIT' });
-  whisperWorker.onmessage = async (event: MessageEvent<WhisperUiMessage>) => {
+  transcribeButton.disabled = true;
+  setStatus('Checking browser GPU…');
+
+  const gpu = (navigator as Navigator & { gpu?: { requestAdapter: () => Promise<unknown | null> } }).gpu;
+  let device: 'webgpu' | 'wasm' = 'wasm';
+  if (gpu) {
+    try {
+      device = await gpu.requestAdapter() ? 'webgpu' : 'wasm';
+    } catch {
+      device = 'wasm';
+    }
+  }
+
+  whisperWorker.onmessage = (event: MessageEvent<WhisperUiMessage>) => {
     if (event.data.status === 'loading') setStatus(event.data.message ?? 'Loading model…');
+    if (event.data.status === 'fallback') setStatus(event.data.message ?? 'Using CPU/WASM fallback…');
     if (event.data.status === 'ready') {
-      setStatus(`Whisper ready · ${event.data.model}`);
+      setStatus(`Whisper ready · ${event.data.device === 'webgpu' ? 'WebGPU' : 'CPU/WASM'}`);
+      aiProgress.textContent = event.data.device === 'webgpu' ? ' · GPU acceleration' : ' · slower CPU fallback';
       transcribeButton.disabled = false;
-      if ('gpu' in navigator) {
-        aiProgress.textContent = ' · WebGPU';
-      } else {
-        aiProgress.textContent = ' · WASM fallback recommended';
-      }
+      bootAiButton.textContent = 'Whisper ready';
     }
     if (event.data.status === 'transcribing') setStatus('Transcribing locally…');
     if (event.data.status === 'done') {
-      const text = event.data.text ?? '';
-      transcriptResult.innerHTML = `<p>${escapeHtml(text)}</p>`;
+      transcriptResult.innerHTML = `<p>${escapeHtml(event.data.text ?? '')}</p>`;
       setStatus('Transcription complete');
       transcribeButton.disabled = false;
     }
-    if (event.data.status === 'error') { setStatus(`Error: ${event.data.message ?? 'Unknown worker error'}`); bootAiButton.disabled = false; transcribeButton.disabled = true; }
+    if (event.data.status === 'error') {
+      setStatus(`Whisper could not load: ${event.data.message ?? 'Unknown worker error'}`);
+      bootAiButton.disabled = false;
+      transcribeButton.disabled = true;
+    }
   };
-  try {
-    llmEngine = await CreateWebWorkerMLCEngine(llmWorker, 'Phi-3.5-mini-instruct-q4f16_1-MLC', { initProgressCallback: (progress) => { aiProgress.textContent = ` · ${Math.round(progress.progress * 100)}%`; } });
-    void llmEngine;
-    aiProgress.textContent = ' · LLM available';
-  } catch (error) {
-    aiProgress.textContent = ` · LLM unavailable (${error instanceof Error ? error.message : 'unsupported model'})`;
-  }
+
+  whisperWorker.postMessage({ type: 'INIT', device });
 });
 transcribeButton.addEventListener('click', async () => { if (!selectedFile) return; transcribeButton.disabled = true; const context = new AudioContext({ sampleRate: 16000 }); try { const buffer = await context.decodeAudioData(await selectedFile.arrayBuffer()); const channel = buffer.getChannelData(0); const copy = new Float32Array(channel); whisperWorker.postMessage({ type: 'TRANSCRIBE', audioData: copy, sampleRate: buffer.sampleRate }, [copy.buffer]); } catch (error) { setStatus(`Audio decode failed: ${error instanceof Error ? error.message : String(error)}`); transcribeButton.disabled = false; } finally { await context.close(); } });
 
