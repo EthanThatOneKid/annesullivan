@@ -15,6 +15,10 @@ The name is a reference to the teacher and interpreter who helped Helen Keller t
 - Worker boundaries prepared for local Whisper transcription and WebLLM structured extraction.
 - GitHub Actions type-check, production build, and GitHub Pages deployment.
 
+## Live preview
+
+The current `main` build is published at https://ethanthatonekid.github.io/annesullivan/.
+
 ## Development
 
 ```sh
