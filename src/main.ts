@@ -213,7 +213,7 @@ bootAiButton.addEventListener('click', async () => {
   bootAiButton.disabled = true;
   setStatus('Loading Whisper…');
   whisperWorker.postMessage({ type: 'INIT' });
-  whisperWorker.onmessage = async (event: MessageEvent<{ status: string; message?: string; model?: string; text?: string; chunks?: Array<{ text: string; timestamp: [number, number] } }>) => {
+  whisperWorker.onmessage = async (event: MessageEvent<{ status: string; message?: string; model?: string; text?: string; chunks?: Array<{ text: string; timestamp: [number, number] }>) => {
     if (event.data.status === 'loading') setStatus(event.data.message ?? 'Loading model…');
     if (event.data.status === 'ready') {
       setStatus(`Whisper ready · ${event.data.model}`);
